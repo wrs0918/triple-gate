@@ -1,0 +1,22 @@
+# Python
+.venv
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+*.egg-info/
+
+# 书籍工作区（运行时产物，不入库；锚定仓库根目录，勿吞掉 scripts/state 等源码）
+/exports/
+/chapters/
+/qa/
+/projections/
+/state/
+/outline/
+/book.json
+/.gate/
+
+# 系统与编辑器
+.DS_Store
+*.swp
