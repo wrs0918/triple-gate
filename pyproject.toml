@@ -19,7 +19,6 @@ addopts = "-q"
 
 [tool.coverage.run]
 source = ["scripts"]
-omit = ["scripts/tg.py"]
 
 [tool.coverage.report]
 fail_under = 80

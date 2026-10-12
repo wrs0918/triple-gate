@@ -64,6 +64,13 @@ class TestSchemaState:
         sample_state["timeline"][0]["reveal_status"] = "maybe"
         assert any("reveal_status" in e for e in validate_state(sample_state))
 
+    def test_state_foreshadowing_due_ch_must_be_int(self, sample_state):
+        sample_state["foreshadowing"] = [
+            {"id": "F-001", "content": "旧疤", "planted_ch": 1, "status": "planted",
+             "due_ch": "10", "priority": "high"}
+        ]
+        assert any("due_ch" in e for e in validate_state(sample_state))
+
     def test_planning_phase_allows_empty_north_star(self, sample_state):
         sample_state["progress"]["phase"] = "planning"
         sample_state["book"]["north_star"] = {
@@ -88,6 +95,32 @@ class TestSchemaChanges:
     def test_bad_timeline_enum_fails(self):
         bad = _changes(timeline_new=[{"objective_fact": "x", "reader_knowledge": "y", "reveal_status": "猜"}])
         assert any("reveal_status" in e for e in validate_changes(bad))
+
+    def test_due_ch_must_be_int(self):
+        # LLM 常把章号写成字符串；不拦住会在渲染时 TypeError 并污染已落盘状态
+        bad = _changes(foreshadowing_planted=[{"content": "伏笔", "due_ch": "20", "priority": "high"}])
+        assert any("due_ch" in e for e in validate_changes(bad))
+
+    def test_due_ch_optional(self):
+        changes = _changes(foreshadowing_planted=[{"content": "伏笔", "priority": "high"}])
+        assert validate_changes(changes) == []
+
+    def test_hooks_new_requires_content(self):
+        bad = _changes(hooks_new=[{"type": "章尾悬念"}])
+        assert any("content" in e for e in validate_changes(bad))
+
+    def test_hooks_rewarded_must_be_str_list(self):
+        bad = _changes(hooks_rewarded=[{"id": "H-001"}])
+        assert any("hooks_rewarded" in e for e in validate_changes(bad))
+
+    def test_known_facts_add_must_be_str_list(self):
+        # 单字符串会被逐字拆开污染 known_facts，必须在schema层拦下
+        bad = _changes(characters_update=[{"name": "陈默", "known_facts_add": "他知道凶手"}])
+        assert any("known_facts_add" in e for e in validate_changes(bad))
+
+    def test_foreshadowing_paid_must_be_str_list(self):
+        bad = _changes(foreshadowing_paid=[{"id": "F-001"}])
+        assert any("foreshadowing_paid" in e for e in validate_changes(bad))
 
 
 class TestStore:
@@ -179,6 +212,14 @@ class TestCommit:
         with pytest.raises(ValueError, match="门禁"):
             apply_changes(state, _changes())
 
+    def test_string_due_ch_rejected_cleanly(self, sample_state):
+        # 回归：字符串 due_ch 必须在合并前被 schema 拦下（曾导致渲染 TypeError）
+        state = _ready(sample_state)
+        with pytest.raises(ValueError, match="due_ch"):
+            apply_changes(state, _changes(
+                foreshadowing_planted=[{"content": "伏笔", "due_ch": "20", "priority": "high"}]
+            ))
+
 
 class TestRender:
     def test_render_and_check_consistent(self, tmp_path, sample_state):
@@ -202,6 +243,17 @@ class TestRender:
         render_projections(state, tmp_path)
         content = (tmp_path / "timeline.md").read_text(encoding="utf-8")
         assert "作者真相" in content and "读者已知" in content
+
+    def test_render_escapes_pipe_in_cells(self, tmp_path, sample_state):
+        # LLM 产出的内容含竖线会撑破 markdown 表格，渲染时必须转义
+        sample_state["timeline"].append({
+            "chapter": 1, "objective_fact": "A|B 两套计划",
+            "reader_knowledge": "读者知道 A|B", "reveal_status": "revealed",
+        })
+        render_projections(sample_state, tmp_path)
+        content = (tmp_path / "timeline.md").read_text(encoding="utf-8")
+        assert "A\\|B" in content
+        assert check_projections(sample_state, tmp_path) == []
 
     def test_overdue_foreshadowing_marked(self, tmp_path, sample_state):
         sample_state["foreshadowing"] = [

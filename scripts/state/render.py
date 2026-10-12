@@ -10,6 +10,11 @@ from pathlib import Path
 PROJECTION_FILES = ("timeline.md", "foreshadowing.md", "characters.md", "status.md")
 
 
+def _cell(value) -> str:
+    """markdown 表格单元格转义：竖线会撑破表格，换行会破坏行结构。"""
+    return str(value).replace("|", "\\|").replace("\n", " ")
+
+
 def _render_timeline(state: dict) -> str:
     lines = [
         "# 双时间线",
@@ -19,8 +24,8 @@ def _render_timeline(state: dict) -> str:
     ]
     for entry in state["timeline"]:
         lines.append(
-            f"| {entry['chapter']} | {entry['objective_fact']} "
-            f"| {entry['reader_knowledge']} | {entry['reveal_status']} |"
+            f"| {entry['chapter']} | {_cell(entry['objective_fact'])} "
+            f"| {_cell(entry['reader_knowledge'])} | {entry['reveal_status']} |"
         )
     lines.append("")
     return "\n".join(lines)
@@ -39,7 +44,7 @@ def _render_foreshadowing(state: dict) -> str:
         if status == "planted" and due is not None and due < current:
             status += " ⚠超期"
         lines.append(
-            f"| {f['id']} | {f['content']} | {f['planted_ch']} | {status} "
+            f"| {f['id']} | {_cell(f['content'])} | {f['planted_ch']} | {status} "
             f"| {due if due is not None else '—'} | {f['priority']} |"
         )
     lines.append("")

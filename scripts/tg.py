@@ -68,7 +68,7 @@ def _cmd_start(args: argparse.Namespace) -> int:
         for field in missing:
             print(f"  - state/state.json → book.north_star.{field} 为空")
         return EXIT_GATE_FAILED
-    state["progress"]["phase"] = "writing"
+    state = {**state, "progress": {**state["progress"], "phase": "writing"}}
     save_state(layout.STATE_FILE, state)
     print("书魂卡齐备，进入写作阶段。用「写第N章」开始章循环")
     return EXIT_OK
@@ -125,15 +125,21 @@ def _print_gate_summary(chapter: int, report: dict) -> None:
     print(f"  lint 密度：{report['layer2']['density_grade']}（advisory 明细见 {layout.qa_gate(chapter)}）")
 
 
+def _gate_and_store_report(text: str, chapter: int, previous: str | None = None) -> dict:
+    """跑机器门禁并把报告落盘到 qa/chNNN_gate.json。"""
+    report = run_gate(text, whitelist=_read_whitelist(), previous_text=previous)
+    target = Path(layout.qa_gate(chapter))
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    return report
+
+
 def _cmd_gate(args: argparse.Namespace) -> int:
     state = load_state(layout.STATE_FILE)
     text = read_text(args.file)
     previous = read_text(args.previous_file) if args.previous_file else None
-    report = run_gate(text, whitelist=_read_whitelist(), previous_text=previous)
     chapter = args.chapter
-    target = Path(layout.qa_gate(chapter))
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    report = _gate_and_store_report(text, chapter, previous)
     state = record_gate(state, chapter, "layer1", report["layer1"]["passed"])
     state = record_gate(state, chapter, "layer2", report["layer2"]["passed"])
     save_state(layout.STATE_FILE, state)
@@ -147,13 +153,36 @@ def _cmd_commit(args: argparse.Namespace) -> int:
         changes = json.loads(read_text(args.changes))
     except json.JSONDecodeError as exc:
         raise GateError(f"变更文件不是合法 JSON：{args.changes}：{exc}") from exc
+    if not isinstance(changes, dict):
+        raise GateError(f"变更文件应为 JSON 对象：{args.changes}")
     chapter = args.chapter
-    if not Path(layout.chapter_final(chapter)).exists():
+    if changes.get("chapter") != chapter:
+        raise GateError(
+            f"章号不一致：--chapter 为第 {chapter} 章，变更文件为第 {changes.get('chapter')} 章"
+        )
+    final_path = Path(layout.chapter_final(chapter))
+    if not final_path.exists():
         print(f"缺少终稿文件：{layout.chapter_final(chapter)}（机器门禁与 rubric 通过后保存终稿再提交）")
         return EXIT_GATE_FAILED
-    if not Path(layout.qa_rubric(chapter)).exists():
+    rubric_path = Path(layout.qa_rubric(chapter))
+    if not rubric_path.exists():
         print(f"缺少第三层 rubric 报告：{layout.qa_rubric(chapter)}（按 rubric 协议完成审查后重试）")
         return EXIT_GATE_FAILED
+    rubric_text = rubric_path.read_text(encoding="utf-8")
+    if not rubric_text.strip() or "结论" not in rubric_text:
+        print(f"rubric 报告无效：{layout.qa_rubric(chapter)} 为空或缺少「结论」段（按 rubric 协议补全后重试）")
+        return EXIT_GATE_FAILED
+    # 终稿重跑机器门禁（零 token）：rubric 修复引入的硬伤必须在这里被拦下，
+    # 草稿时代的 layer1/layer2 记录不能替终稿作证
+    draft_path = Path(layout.chapter_draft(chapter))
+    previous = read_text(draft_path) if draft_path.exists() else None
+    report = _gate_and_store_report(read_text(final_path), chapter, previous)
+    if not report["passed"]:
+        _print_gate_summary(chapter, report)
+        print("终稿未过机器门禁：按报告修复终稿后重新 commit")
+        return EXIT_GATE_FAILED
+    state = record_gate(state, chapter, "layer1", True)
+    state = record_gate(state, chapter, "layer2", True)
     state = record_gate(state, chapter, "layer3", True)
     state = apply_changes(state, changes)
     save_state(layout.STATE_FILE, state)

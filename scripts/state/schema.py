@@ -64,6 +64,17 @@ def _require_enum(value, allowed: set[str], where: str, errors: list[str]) -> No
         _err(errors, where, f"非法值「{value}」（允许：{allowed_text}）")
 
 
+def _require_optional_int(obj: dict, key: str, where: str, errors: list[str], minimum: int | None = None) -> None:
+    """key 存在时才校验（可选整数字段）。"""
+    if key in obj and obj[key] is not None:
+        _require_int(obj, key, where, errors, minimum=minimum)
+
+
+def _require_str_list(value, where: str, errors: list[str]) -> None:
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        _err(errors, where, "应为字符串列表")
+
+
 def _validate_timeline_entry(entry: dict, where: str, errors: list[str]) -> None:
     if not isinstance(entry, dict):
         _err(errors, where, "应为对象")
@@ -127,6 +138,7 @@ def _validate_collections(state: dict, errors: list[str]) -> None:
         _require_str(entry, "id", where, errors)
         _require_str(entry, "content", where, errors)
         _require_int(entry, "planted_ch", where, errors, minimum=1)
+        _require_optional_int(entry, "due_ch", where, errors, minimum=1)
         _require_enum(entry.get("status"), FORESHADOW_STATUSES, f"{where}.status", errors)
         _require_enum(entry.get("priority"), PRIORITIES, f"{where}.priority", errors)
     for entry in state["hooks"]:
@@ -197,15 +209,28 @@ def _validate_changes_optional(changes: dict, errors: list[str]) -> None:
             _err(errors, where, "应为对象")
             continue
         _require_str(entry, "content", where, errors)
+        _require_optional_int(entry, "due_ch", where, errors, minimum=1)
         _require_enum(entry.get("priority"), PRIORITIES, f"{where}.priority", errors)
-    if not isinstance(changes.get("foreshadowing_paid", []) or [], list):
-        _err(errors, "changes.foreshadowing_paid", "应为字符串列表")
+    if "foreshadowing_paid" in changes:
+        _require_str_list(changes.get("foreshadowing_paid"), "changes.foreshadowing_paid", errors)
+    for entry in changes.get("hooks_new", []) or []:
+        where = "changes.hooks_new"
+        if not isinstance(entry, dict):
+            _err(errors, where, "应为对象")
+            continue
+        _require_str(entry, "content", where, errors)
+    if "hooks_rewarded" in changes:
+        _require_str_list(changes.get("hooks_rewarded"), "changes.hooks_rewarded", errors)
     for entry in changes.get("characters_update", []) or []:
         where = "changes.characters_update"
         if not isinstance(entry, dict):
             _err(errors, where, "应为对象")
             continue
         _require_str(entry, "name", where, errors)
+        if "known_facts_add" in entry:
+            _require_str_list(
+                entry.get("known_facts_add"), f"{where}.known_facts_add", errors
+            )
     for entry in changes.get("anti_patterns_new", []) or []:
         where = "changes.anti_patterns_new"
         if not isinstance(entry, dict):

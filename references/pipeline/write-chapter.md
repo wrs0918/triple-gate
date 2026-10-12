@@ -80,7 +80,7 @@ python scripts/tg.py gate --file chapters/chNNN_draft.md --chapter N
 python scripts/tg.py commit --chapter N --changes qa/chNNN_changes.json
 ```
 
-commit 前置条件：机器门禁通过、`qa/chNNN_rubric.md` 存在、终稿已保存为 `chapters/chNNN_final.md`。提交成功后状态版本自增、投影重渲染——至此本章闭环。
+commit 前置条件：`qa/chNNN_rubric.md` 存在且含「结论」段、终稿已保存为 `chapters/chNNN_final.md`。**commit 会对终稿重跑第一+第二层机器门禁（零 token）**：rubric 修复引入的硬伤在这里被拦下，不过则拒绝提交——草稿时代的门禁记录不能替终稿作证。提交成功后状态版本自增、投影重渲染——至此本章闭环。
 
 **终稿处理**：机器门禁与 rubric 全部通过且无待改项时，把 draft 复制为 final；有修复则保存修复后的版本为 final。
 

@@ -2,7 +2,8 @@
 
 预算原则（借鉴头部项目的做法）：
 - 书魂卡与本章大纲永不裁剪（北极星不可打折）
-- 超预算时按优先级从低到高整段丢弃：禁忌 → 文风基准 → 读者已知 → 角色 → 伏笔 → 摘要
+- 读者已知最后裁剪：它是硬规则「正文不得超出读者已知」的唯一执行依据
+- 超预算时按优先级从低到高整段丢弃（顺序见 _SHRINK_ORDER）
 - 固定部分自身超预算则直接报错（说明大纲条目该精简了）
 """
 
@@ -12,10 +13,22 @@ DEFAULT_BUDGET = 12000
 _SUMMARY_WINDOW = 3
 _SUMMARY_MAX_CHARS = 300
 _ANTI_PATTERN_WINDOW = 10
+_HOOK_WINDOW = 10
 _FORESHADOW_LINE_MAX = 80
+# 与 scripts.state.commit._DEFAULT_COOLDOWN 同值：冷却期只读不写，手改状态缺该字段时兜底
+_DEFAULT_TROPE_COOLDOWN = 10
 
-# 超预算时从低到高丢弃的顺序
-_SHRINK_ORDER = ("anti_patterns", "style", "reader_knowledge", "characters", "foreshadowing", "summaries")
+# 超预算时从低到高整段丢弃的顺序（越靠后越晚被丢）
+_SHRINK_ORDER = (
+    "anti_patterns",   # 质检反哺：丢了质量回退，但不伤连续性
+    "tropes_cooling",  # 冷却套路：建议性约束
+    "style",           # 文风基准：语感参考
+    "hooks",           # 未回报钩子：兑现提醒
+    "foreshadowing",   # 活跃伏笔：埋设/回收提醒
+    "characters",      # 角色状态：连续性
+    "summaries",       # 最近章摘要：剧情连续性
+    "reader_knowledge",# 读者已知：防剧透泄漏（硬规则），最后裁剪
+)
 
 
 def _render_north_star(state: dict) -> str:
@@ -75,13 +88,44 @@ def _render_foreshadowing(state: dict) -> str:
     return "\n".join(lines)
 
 
+def _render_hooks(state: dict) -> str:
+    """未回报钩子：部署后尚未兑现的承诺，写作时需要有兑现意识。"""
+    active = [h for h in state["hooks"] if h["status"] == "deployed"]
+    if not active:
+        return ""
+    lines = ["## 未回报钩子（读者在等兑现，近期章节应有进展）", ""]
+    for h in active[-_HOOK_WINDOW:]:
+        lines.append(f"- [{h['id']}] {h['content']}（第{h['deployed_ch']}章部署）")
+    return "\n".join(lines)
+
+
+def _render_tropes_cooling(state: dict) -> str:
+    """冷却中的套路：近期已用过的套路本章避免复用（同质化防线）。"""
+    current = state["progress"]["current_chapter"]
+    cooling: list[tuple[int, str, int]] = []
+    for trope in state["tropes"]:
+        cooldown = trope.get("cooldown", _DEFAULT_TROPE_COOLDOWN)
+        recent = [c for c in trope.get("chapters", []) if 0 <= current - c <= cooldown]
+        if recent:
+            cooling.append((max(recent), trope["name"], cooldown))
+    if not cooling:
+        return ""
+    lines = ["## 冷却中的套路（近期已用，本章避免复用）", ""]
+    for last_used, name, cooldown in sorted(cooling, reverse=True):
+        lines.append(f"- {name}（第{last_used}章用过，冷却 {cooldown} 章）")
+    return "\n".join(lines)
+
+
 def _render_characters(state: dict) -> str:
     if not state["characters"]:
         return ""
     lines = ["## 出场角色状态", ""]
     for c in state["characters"]:
         state_text = "、".join(f"{k}:{v}" for k, v in c["state"].items())
-        lines.append(f"- {c['name']}（{c['role']}）｜{state_text}｜已知：{'；'.join(c['known_facts']) or '—'}")
+        line = f"- {c['name']}（{c['role']}）｜{state_text}｜已知：{'；'.join(c['known_facts']) or '—'}"
+        if c.get("speech_print"):
+            line += f"｜语言指纹：{c['speech_print']}"
+        lines.append(line)
     return "\n".join(lines)
 
 
@@ -117,7 +161,10 @@ def _assemble(north: str, outline: str, sections: dict[str, str]) -> str:
     outline_entry = outline.strip()
     if outline_entry:
         parts += ["## 本章大纲", "", outline_entry, ""]
-    for key in ("summaries", "foreshadowing", "characters", "reader_knowledge", "style", "anti_patterns"):
+    for key in (
+        "summaries", "foreshadowing", "hooks", "characters",
+        "reader_knowledge", "style", "anti_patterns", "tropes_cooling",
+    ):
         text = sections.get(key, "")
         if text:
             parts += [text, ""]
@@ -133,10 +180,12 @@ def build_context(state: dict, outline_entry: str, budget: int = DEFAULT_BUDGET)
     sections = {
         "summaries": _render_summaries(state),
         "foreshadowing": _render_foreshadowing(state),
+        "hooks": _render_hooks(state),
         "characters": _render_characters(state),
         "reader_knowledge": _render_reader_knowledge(state),
         "style": _render_style(state),
         "anti_patterns": _render_anti_patterns(state),
+        "tropes_cooling": _render_tropes_cooling(state),
     }
     north = _render_north_star(state)
     while True:

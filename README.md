@@ -38,7 +38,7 @@ Python 3.10+ · 纯标准库 · Agent Skill
 - `state/state.json` 是唯一真源（schema 校验强制），一切章变更经 `tg commit` 入账
 - `projections/`（双时间线 / 伏笔台账 / 角色状态 / 进度）是从真源整份重渲染的派生视图，**手改会被 `tg check` 拒绝**
 - 双时间线：每条事实分记「作者真相」与「读者已知」+ 揭示状态，写作上下文只带读者已知侧，从机制上杜绝"角色提前知道答案"
-- 写前上下文包硬预算 12KB：书魂卡与本章大纲永不裁剪，其余按优先级收缩——长跑成本可控
+- 写前上下文包硬预算 12KB：书魂卡与本章大纲永不裁剪、「读者已知」最后裁剪（防剧透是硬规则），其余按优先级收缩——长跑成本可控
 
 ## 快速开始
 
@@ -77,7 +77,7 @@ triple-gate/
 │   ├── context.py             # 上下文包组装（12KB 预算）
 │   └── export.py               # 番茄导出
 ├── templates/book/             # 新书模板
-├── tests/                      # 151 个测试，覆盖率 92%
+├── tests/                      # 170 个测试，覆盖率 92%
 └── .github/workflows/ci.yml    # pytest × Python 3.10/3.12 + 覆盖率门槛 80%
 ```
 
@@ -92,7 +92,7 @@ pip install pytest pytest-cov
 pytest --cov=scripts --cov-fail-under=80
 ```
 
-- 151 个单元/集成测试，行覆盖率 92%
+- 170 个单元/集成测试，行覆盖率 92%（含 CLI 层）
 - 阈值单一来源：`scripts/metrics/bands.py`（文档与代码不再两处维护）
 - 规则与阈值来源：oh-story（7369★）的真人语料校准 + sepia（3046★）的语料实证研究（2026-10 移植）
 - jieba 缺失时 TTR 自动降级为参考级指标，永不误判

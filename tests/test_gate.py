@@ -138,6 +138,45 @@ class TestBuildContext:
         with pytest.raises(ValueError, match="预算"):
             build_context(sample_state, "## 第1章 x" + "长" * 500, budget=200)
 
+    def test_speech_print_in_context(self, sample_state):
+        # rubric S3 要求对齐 speech_print，写作时必须在上下文里看得到
+        ctx = build_context(sample_state, "## 第1章 x")
+        assert "短句，几乎不用语气词" in ctx
+
+    def test_deployed_hooks_in_context(self, sample_state):
+        sample_state["hooks"] = [
+            {"id": "H-001", "content": "章尾悬念：女人开口", "deployed_ch": 1, "status": "deployed"},
+            {"id": "H-002", "content": "已回报的钩子", "deployed_ch": 1, "status": "rewarded"},
+        ]
+        sample_state["progress"]["current_chapter"] = 2
+        ctx = build_context(sample_state, "## 第2章 x")
+        assert "章尾悬念" in ctx
+        assert "已回报的钩子" not in ctx
+
+    def test_cooling_tropes_in_context(self, sample_state):
+        sample_state["tropes"] = [
+            {"name": "冷开场", "chapters": [1], "cooldown": 10},
+            {"name": "老套路", "chapters": [1], "cooldown": 1},
+        ]
+        sample_state["progress"]["current_chapter"] = 5
+        ctx = build_context(sample_state, "## 第5章 x")
+        assert "冷开场" in ctx      # 第1章用过，冷却10章 → 仍在冷却
+        assert "老套路" not in ctx  # 冷却1章 → 已出冷却
+
+    def test_reader_knowledge_outlives_summaries_under_budget(self, sample_state):
+        # 硬规则 #7（正文不得超出读者已知）的依据必须比章摘要活得更久
+        sample_state["chapters"] = {
+            f"ch{i:03d}": {
+                "status": "final", "gate_layer1": "passed", "gate_layer2": "passed",
+                "gate_layer3": "passed", "summary": "摘要" * 150,
+            }
+            for i in range(1, 4)
+        }
+        sample_state["progress"]["current_chapter"] = 4
+        ctx = build_context(sample_state, "## 第4章 x", budget=800)
+        assert "读者已知" in ctx
+        assert "最近章摘要" not in ctx
+
     def test_recent_summaries_included(self, sample_state):
         sample_state["chapters"]["ch001"] = {
             "status": "final", "gate_layer1": "passed", "gate_layer2": "passed",

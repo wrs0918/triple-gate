@@ -9,6 +9,8 @@ from __future__ import annotations
 import re
 from collections import Counter
 
+from scripts.core.textio import cjk_len
+
 try:  # 可选依赖：未安装时走降级路径
     import jieba  # type: ignore
     import jieba.posseg  # type: ignore
@@ -115,21 +117,19 @@ def lexical_density(text: str) -> tuple[float, bool]:
     if not chars:
         return 0.0, not HAS_JIEBA
     if HAS_JIEBA:
-        words = [w for w, _flag in jieba.posseg.lcut("".join(chars))]
+        pairs = jieba.posseg.lcut("".join(chars))
+        if not pairs:
+            return 0.0, True
         content = [
-            w
-            for w, flag in jieba.posseg.lcut("".join(chars))
-            if flag.startswith(("n", "v", "a", "r", "m", "q"))
+            w for w, flag in pairs if flag.startswith(("n", "v", "a", "r", "m", "q"))
         ]
-        return round(len(content) / len(words), 4), False if words else True
+        return round(len(content) / len(pairs), 4), False
     content = [c for c in chars if c not in _FUNCTION_CHARS]
     return round(len(content) / len(chars), 4), True
 
 
 def dialogue_ratio(text: str) -> float:
     """对话占比：引号内 CJK 字数 / 全文 CJK 字数。"""
-    from scripts.core.textio import cjk_len
-
     total = cjk_len(text)
     if total == 0:
         return 0.0
