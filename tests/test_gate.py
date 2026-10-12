@@ -13,6 +13,25 @@ class TestRunLayer1:
         sigma = [v for v in report["verdicts"] if v["metric"] == "sigma2"][0]
         assert sigma["status"] == "red"
 
+    def test_uniform_text_equal_run_red(self):
+        # 等长句连串：句长平坦的文本此指标爆红（人类语料中位约每百句 2 串）
+        report = run_layer1(uniform_text())
+        equal = [v for v in report["verdicts"] if v["metric"] == "equal_run"][0]
+        assert equal["status"] == "red"
+
+    def test_varied_text_equal_run_green(self):
+        report = run_layer1(varied_text())
+        equal = [v for v in report["verdicts"] if v["metric"] == "equal_run"][0]
+        assert equal["status"] == "green"
+
+    def test_reference_metrics_present(self):
+        # 语气词/连词密度与句长 CV 为参考级指标：展示但不判红
+        report = run_layer1(varied_text())
+        by_metric = {v["metric"]: v for v in report["verdicts"]}
+        assert by_metric["particle_density"]["status"] == "ref"
+        assert by_metric["connective_density"]["status"] == "ref"
+        assert by_metric["burst_cv"]["status"] == "ref"
+
     def test_varied_text_passes(self):
         report = run_layer1(varied_text())
         assert report["passed"] is True

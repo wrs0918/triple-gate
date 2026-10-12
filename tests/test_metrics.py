@@ -4,9 +4,12 @@ from scripts.metrics.bands import classify
 from scripts.metrics.indicators import (
     burst_cv,
     clean_chars,
+    connective_density,
     dialogue_ratio,
+    equal_runs,
     lexical_density,
     paragraph_cv,
+    particle_density,
     sentence_length_std,
     trigram_stats,
     ttr,
@@ -73,6 +76,44 @@ class TestOthers:
         assert "".join(clean_chars("你好，世界！abc 123")) == "你好世界abc123"
 
 
+class TestEqualRuns:
+    def test_uniform_sentences_all_triples(self):
+        sentences = ["他看着眼前的景象，不由得感到一阵寒意。"] * 20
+        # 20 个等长句 → 18 个相邻三元组全部近等长
+        assert equal_runs(sentences) == 18
+
+    def test_varied_sentences_zero(self):
+        sentences = ["他走了。", "这句话到底能有多长呢长到让人窒息。", "停。", "风把窗帘掀开了一角。"]
+        assert equal_runs(sentences) == 0
+
+    def test_three_equal_count_one(self):
+        assert equal_runs(["一样长短的句子。", "再写一样长短。", "三句完全等长。"]) == 1
+
+    def test_empty_safe(self):
+        assert equal_runs([]) == 0
+        assert equal_runs(["只有一句。"]) == 0
+
+
+class TestParticleDensity:
+    def test_dialogue_rich_text_higher_than_narration(self):
+        narration = "他走到门口，推开门，走进房间，坐下休息。"
+        dialogue = "「走吧。」「你等等我啊。」「急什么呢，车还没来嘛。」"
+        assert particle_density(dialogue) > particle_density(narration)
+
+    def test_pure_narration_zero(self):
+        assert particle_density("他推开门走进房间坐下打开了灯。") == 0.0
+
+
+class TestConnectiveDensity:
+    def test_chained_connectives_higher(self):
+        chained = "然而因此此外同时所以但是然后并且"
+        plain = "他吃完饭出门上班开会回家睡觉。"
+        assert connective_density(chained) > connective_density(plain)
+
+    def test_empty_text_zero(self):
+        assert connective_density("") == 0.0
+
+
 class TestBands:
     def test_sigma2_green_in_band(self):
         assert classify("sigma2", 15).status == "green"
@@ -110,3 +151,24 @@ class TestBands:
 
     def test_verdict_carries_direction(self):
         assert classify("sigma2", 3).direction != ""
+
+    def test_equal_run_green(self):
+        assert classify("equal_run", 2).status == "green"
+
+    def test_equal_run_yellow(self):
+        assert classify("equal_run", 8).status == "yellow"
+
+    def test_equal_run_red_above(self):
+        # 句长平坦：等长句连串爆表（人类语料中位约每百句 2 串）
+        assert classify("equal_run", 20).status == "red"
+
+    def test_burst_cv_demoted_to_reference(self):
+        # OPACE-2026 实测句长 CV 阈值无鉴别力（AUROC≈0.52），降级为参考指标
+        assert classify("burst_cv", 0.05).status == "ref"
+        assert classify("burst_cv", 5.0).status == "ref"
+
+    def test_particle_density_reference(self):
+        assert classify("particle_density", 0.0).status == "ref"
+
+    def test_connective_density_reference(self):
+        assert classify("connective_density", 0.5).status == "ref"

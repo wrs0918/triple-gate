@@ -24,6 +24,14 @@ _QUOTED = re.compile(r"「[^」]*」|『[^』]*』|“[^”]*”")
 # 降级路径下按字符近似内容词密度时，剔除的汉语功能字
 _FUNCTION_CHARS = set("的了着过是在和与跟同也很都还又就把被让使对从向于为以及等地得")
 
+# 语气词：HC3-zh 实测人类 0.016 vs ChatGPT 0.003（全部特征中差距最大，约 5 倍）
+_PARTICLE_CHARS = set("啊吧呢嘛喔啦耶哟喽诶")
+# 连词：HC3-zh 实测人类 0.013 vs ChatGPT 0.036（约 3 倍）；只收无歧义的多字连词
+_CONNECTIVE_WORDS = ("以及", "并且", "同时", "此外", "因此", "然而", "但是", "所以", "然后", "不过", "于是")
+
+# 等长句连串：人类语料中位约每百句 2 串；近等长容差取窗口最长句的 25%
+_EQUAL_RUN_TOLERANCE = 0.25
+
 
 def _visual_len(text: str) -> int:
     """可见长度：去空白后的字符数（含标点）。"""
@@ -127,3 +135,51 @@ def dialogue_ratio(text: str) -> float:
         return 0.0
     quoted = sum(cjk_len(seg) for seg in _QUOTED.findall(text))
     return round(quoted / total, 4)
+
+
+def _window_near_equal(window: list[int]) -> bool:
+    """窗口内各句长是否近等长（最长句的 25% 容差内）。"""
+    longest = max(window)
+    if longest == 0:
+        return True
+    return longest - min(window) <= _EQUAL_RUN_TOLERANCE * longest
+
+
+def equal_runs(sentences: list[str]) -> int:
+    """等长句连串数：相邻三元组内三句近等长的组数（滑动窗口，可重叠）。
+
+    句长离散度是全部研究中方向唯一稳健的人机差异（人类 SD 更大）；
+    人类语料中位约每百句 2 串，AI 生成文本句长平坦、连串显著偏多。
+    """
+    lengths = [_visual_len(s) for s in sentences]
+    return sum(
+        1
+        for i in range(len(lengths) - 2)
+        if _window_near_equal(lengths[i : i + 3])
+    )
+
+
+def particle_density(text: str) -> float:
+    """语气词密度：啊/吧/呢/嘛/喔/啦/耶 等占可见字符比。
+
+    口径为字符级（语料研究为词级，同方向不同量纲）；人类文本约为模型的 5 倍，
+    密度过低（叙述通篇无语气词）是 AI 指纹，修法是对话与独白里自然撒入。
+    """
+    chars = clean_chars(text)
+    if not chars:
+        return 0.0
+    hits = sum(1 for c in chars if c in _PARTICLE_CHARS)
+    return round(hits / len(chars), 4)
+
+
+def connective_density(text: str) -> float:
+    """连词密度：以及/并且/同时/因此/然而 等占可见字符比。
+
+    模型文本连词密度约为人类的 3 倍；连词串接是机器痕迹，
+    修法是删掉连词、让并置（意合）承担衔接。
+    """
+    joined = "".join(clean_chars(text))
+    if not joined:
+        return 0.0
+    hits = sum(joined.count(word) for word in _CONNECTIVE_WORDS)
+    return round(hits / len(joined), 4)

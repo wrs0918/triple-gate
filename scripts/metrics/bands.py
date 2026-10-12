@@ -55,12 +55,16 @@ BANDS: dict[str, Band] = {
         "长短句交替：拆开超长句、合并碎短句，制造节奏起伏",
     ),
     "burst_cv": Band(
-        "burst_cv", "BurstCV(句长变异系数)", (0.40, 1.20), 0.30, 1.50, True,
-        "让句子长短突发：连续短句后接一个长句，避免均匀节奏",
+        "burst_cv", "BurstCV(句长变异系数)", (0.40, 1.20), 0.30, 1.50, False,
+        "参考指标：句长 CV 的绝对阈值经实测无鉴别力（AUROC≈0.52），节奏判定看 σ² 与等长句连串",
     ),
     "para_cv": Band(
         "para_cv", "ParaCV(段长变异系数)", (0.30, 1.20), 0.20, 1.50, True,
         "段落长短交替：单行段与多行段穿插，避免豆腐块",
+    ),
+    "equal_run": Band(
+        "equal_run", "等长句连串(每百句)", (0, 6), None, 12, True,
+        "打断连串：拆一句、并两句或删一个子句；人类语料中位约每百句 2 串",
     ),
     "trigram_rep": Band(
         "trigram_rep", "3gram重复率", (0.0, 0.08), None, 0.10, True,
@@ -81,6 +85,14 @@ BANDS: dict[str, Band] = {
     "lexical_density": Band(
         "lexical_density", "内容词密度", (0.0, 1.0), None, None, False,
         "参考指标：监控改稿指纹，AI 改写会使内容词密度骤降",
+    ),
+    "particle_density": Band(
+        "particle_density", "语气词密度", (0.0, 1.0), None, None, False,
+        "参考指标：语气词过稀是 AI 指纹（人类约为模型 5 倍），对话与独白里自然用 啊/吧/呢/嘛",
+    ),
+    "connective_density": Band(
+        "connective_density", "连词密度", (0.0, 1.0), None, None, False,
+        "参考指标：连词堆叠是机器痕迹（模型约为人类 3 倍），删连词让并置承担衔接",
     ),
 }
 

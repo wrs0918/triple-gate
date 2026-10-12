@@ -1,213 +1,91 @@
-"""模式 lint：确定性正则规则 + 退化检测。
+"""模式 lint 引擎：规则执行、叙述掩码、尾部窗口、密度分档。
 
-规则分级：
-- blocking —— 超限即门禁不通过（替换、章末升华、占位符、AI 自我泄漏、复读）
-- advisory —— 计入密度分档（轻/中/重），决定修复策略但不单独拦截
-
-白名单：世界观术语所在的行会被整行豁免（防止「瞳孔」类词误报）。
+执行机制（移植自 oh-story check-ai-patterns 的实战设计）：
+- 叙述掩码：narrative=True 的规则只扫引号外叙述——台词/系统播报里的
+  「不是…而是」是自然口语，不算叙述层 AI 痕迹。掩码用等长「？」占位，
+  保证命中偏移与原行对齐，摘录取自原文。
+- 尾部窗口：tail 规则只扫文末 600 可见字（按行取整），正文中段的同类
+  句式多为正常叙述，不误伤。
+- 双门槛：密度型规则（per_kilo）须「章内次数 > limit 且每千字密度
+  > per_kilo」同时成立才计入违例，防止短文本被单门槛误报。
+- 密度分档：正文 ≥500 字按每千字密度分档（≤5 轻 / ≤15 中 / >15 重），
+  短文本退回按次数分档（≤3 / ≤8 / >8）。
 """
 
 from __future__ import annotations
 
 import re
 from collections import Counter
-from dataclasses import dataclass, field
 
 from scripts.core.textio import cjk_len, split_sentences
+from scripts.lint.model import LintHit, LintReport, LintRule, LintViolation
+from scripts.lint.patterns import ACTION_LIST_VERBS, ALL_RULES, RULE_TABLE
 
-# 章末规则的扫描窗口：最后 N 个非空行
-_TAIL_LINES = 15
-# 密度分档阈值：advisory 总命中数
-_DENSITY_LIGHT = 3
-_DENSITY_MID = 8
+# 尾部窗口：文末 N 可见字（章末规则只扫这里）
+_TAIL_WINDOW_CHARS = 600
+# 密度分档：advisory 有效命中（长文本按每千字 / 短文本按次数）
+_DENSITY_MIN_CHARS = 500
+_DENSITY_PER_KILO_LIGHT = 5.0
+_DENSITY_PER_KILO_MID = 15.0
+_DENSITY_COUNT_LIGHT = 3
+_DENSITY_COUNT_MID = 8
 # 复读检测的最小句长
 _DEGENERATION_MIN_LEN = 8
+# 碎句号：连续 N 个 ≤M 可见字的叙述短句
+_STUTTER_MIN_RUN = 6
+_STUTTER_MAX_SENTENCE = 5
+# 单段过长的字数线
+_LONG_PARAGRAPH_CHARS = 200
+# 监控摄像头式动作清单：同段动作动词与分隔符双门槛
+_ACTION_LIST_MIN_HITS = 5
+_ACTION_LIST_MIN_SEPARATORS = 4
 
-
-@dataclass(frozen=True)
-class LintRule:
-    """一条 lint 规则。limit 为章内允许的最大命中数。"""
-
-    id: str
-    severity: str  # "blocking" | "advisory"
-    pattern: re.Pattern
-    scope: str  # "full" | "tail"
-    limit: int
-    description: str
-    direction: str
-
-
-@dataclass(frozen=True)
-class LintHit:
-    rule_id: str
-    line: int
-    snippet: str
-    direction: str
-
-    def to_dict(self) -> dict:
-        return {
-            "rule_id": self.rule_id,
-            "line": self.line,
-            "snippet": self.snippet,
-            "direction": self.direction,
-        }
-
-
-@dataclass(frozen=True)
-class LintViolation:
-    rule_id: str
-    severity: str
-    count: int
-    limit: int
-    description: str
-    direction: str
-
-    def to_dict(self) -> dict:
-        return {
-            "rule_id": self.rule_id,
-            "severity": self.severity,
-            "count": self.count,
-            "limit": self.limit,
-            "description": self.description,
-            "direction": self.direction,
-        }
-
-
-@dataclass
-class LintReport:
-    blocking: list[LintViolation] = field(default_factory=list)
-    advisory: list[LintViolation] = field(default_factory=list)
-    hits: list[LintHit] = field(default_factory=list)
-    density_grade: str = "轻"
-    word_count: int = 0
-
-    @property
-    def passed(self) -> bool:
-        return not self.blocking
-
-    def to_dict(self) -> dict:
-        return {
-            "passed": self.passed,
-            "blocking": [v.to_dict() for v in self.blocking],
-            "advisory": [v.to_dict() for v in self.advisory],
-            "hits": [h.to_dict() for h in self.hits],
-            "density_grade": self.density_grade,
-            "word_count": self.word_count,
-        }
-
-
-def _compile(pattern: str) -> re.Pattern:
-    return re.compile(pattern)
-
-
-_RULE_TABLE: list[LintRule] = [
-    LintRule(
-        "not-is-comparison", "blocking",
-        _compile(r"不是[^，。！？\n]{1,12}[，,][^，。！？\n]{0,4}而是|不是[^，。！？\n]{1,8}而是"),
-        "full", 2,
-        "「不是X，而是Y」句式", "X/Y 为具体可感名词时保留口语感；抽象概念对举时改为直接陈述事实",
-    ),
-    LintRule(
-        "trailer-ending", "blocking",
-        _compile(r"这一天[，,]这|而这[^，。\n]{0,8}(?:仅仅|只是)[^，。\n]{0,4}开始|属于(?:他|她|他们)的(?:时代|传奇|故事)|命运(?:的)?齿轮|他知道[，,][^，。\n]{0,6}(?:未来|等待|前方)"),
-        "tail", 0,
-        "章末预告式升华", "章尾停在具体动作或对话上，删掉展望未来的总结句",
-    ),
-    LintRule(
-        "trailer-summary", "advisory",
-        _compile(r"(?:他|她)终于明白|(?:他|她)意识到[，,]|这一刻[，,](?:他|她)"),
-        "tail", 1,
-        "章末总结陈词", "让读者自己得出结论，删掉点题句",
-    ),
-    LintRule(
-        "placeholder", "blocking",
-        _compile(r"【[^】]{0,20}(?:待补|待写|TODO|FIXME)[^】]{0,20}】|TODO|FIXME|（待补充）"),
-        "full", 0,
-        "占位符", "补全内容，终稿不允许占位符",
-    ),
-    LintRule(
-        "ai-self-leak", "blocking",
-        _compile(r"作为一个AI|作为一个人工智能|人工智能助手|我无法(?:协助|继续|提供)|很抱歉[，,]我(?:无法|不能)"),
-        "full", 0,
-        "AI 自我泄漏", "删除模型口吻残留，此类文本不得进入终稿",
-    ),
-    LintRule(
-        "micro-tic", "advisory",
-        _compile(r"瞳孔(?:微缩|骤缩|一缩|猛地一缩)|(?:眸光|眸底|眼底)(?:闪过|掠过|浮现)一?丝?|嘴角(?:勾起|噙着|扬起|抽动)一?抹?"),
-        "full", 3,
-        "微表情套话", "改为具体的身体动作或环境反应，同一微表情一章内不重复",
-    ),
-    LintRule(
-        "fossil-adverb", "advisory",
-        _compile(r"不由得|下意识地|心中一(?:凛|惊|沉|紧)|说不出的|莫名(?:地|的)|缓缓地|微微地"),
-        "full", 5,
-        "万能副词与口水词", "直接删掉副词，用动作本身体现节奏",
-    ),
-    LintRule(
-        "em-dash-abuse", "advisory",
-        _compile(r"——"),
-        "full", 20,
-        "破折号滥用", "破折号一章不超过 20 个，改用句号或逗号重新组织",
-    ),
-    LintRule(
-        "negation-parade", "advisory",
-        _compile(r"不是[^。！？\n]{1,12}[，,]也不是[^。！？\n]{1,12}[，,](?:更|也)不是"),
-        "full", 1,
-        "否定排比", "三连否定改为一次正面陈述",
-    ),
-    LintRule(
-        "parallel-triple", "advisory",
-        _compile(r"([^，。；\n]{2,8}的[^，。；\n]{1,5})[，,]\1[，,](?:更|也)?\1"),
-        "full", 1,
-        "工整三连排比", "打破对称：保留两项，第三项换成变奏或删除",
-    ),
-    LintRule(
-        "explain-chain", "advisory",
-        _compile(r"这意味着|换句话说|这背后(?:是|是)|换言之"),
-        "full", 2,
-        "解释链", "删掉元话语，让事件自己说话",
-    ),
-    LintRule(
-        "gongwen", "advisory",
-        _compile(r"值得注意的是|综上所述|由此可见|不言而喻|毋庸置疑|可见一斑"),
-        "full", 1,
-        "公文腔", "改为具体的事实或细节",
-    ),
-    LintRule(
-        "emote-label", "advisory",
-        _compile(r"(?:感到|觉得)[^，。！？\n]{0,4}(?:恐惧|愤怒|悲伤|不安|寒意|温暖|烦躁|震惊|绝望|喜悦)"),
-        "full", 3,
-        "情绪贴标签", "把情绪词换成生理反应＋当下动作",
-    ),
-    LintRule(
-        "dialogue-tag", "advisory",
-        _compile(r"说道|开口道|沉声道|淡淡道|沉吟道"),
-        "full", 8,
-        "对话标签单调", "多数对话直接给内容，或用动作代替「说道」",
-    ),
-    LintRule(
-        "adj-stack", "advisory",
-        _compile(r"(?:[一-鿿]{1,3}的){3,}[一-鿿]{1,4}"),
-        "full", 2,
-        "形容词堆砌", "每个名词前最多一个形容词，其余信息改由动作/环境呈现",
-    ),
+_WHITESPACE_RE = re.compile(r"\s")
+# 成对引号（台词/系统播报/术语）：一律不跨行，正文漏一个收引号很常见
+_QUOTE_PAIRS = [("「", "」"), ("『", "』"), ("【", "】"), ("“", "”"), ("‘", "’"), ('"', '"')]
+_QUOTE_SOURCES = [
+    re.compile(rf"{re.escape(open_q)}[^{re.escape(close_q)}\n]*{re.escape(close_q)}")
+    for open_q, close_q in _QUOTE_PAIRS
 ]
+_SEPARATOR_RE = re.compile(r"[，、；,;]")
 
-SPECIAL_RULES: list[LintRule] = [
-    LintRule(
-        "degeneration", "blocking", _compile(r""),
-        "full", 0,
-        "逐字复读", "同一句完整复现：删除重复内容",
-    ),
-]
 
-ALL_RULES = _RULE_TABLE + SPECIAL_RULES
+def _mask_quoted(line: str) -> str:
+    """把引号片段等长替换为「？」占位：既豁免台词又保住偏移量。
+
+    占位字符必须落在各规则否定类里（？与句号等效），但不能伪造句末断言符。
+    """
+    out = line
+    for source in _QUOTE_SOURCES:
+        out = source.sub(lambda m: "？" * len(m.group(0)), out)
+    return out
+
+
+def _strip_quoted(line: str) -> str:
+    """整段去掉引号片段，只留叙述（碎句号/动作清单统计用）。"""
+    out = line
+    for source in _QUOTE_SOURCES:
+        out = source.sub("", out)
+    return out
+
+
+def _visible_len(text: str) -> int:
+    return len(_WHITESPACE_RE.sub("", text))
 
 
 def _tail_line_numbers(lines: list[str]) -> set[int]:
-    """返回最后 N 个非空行（0 起）的行号集合。"""
-    non_empty = [i for i, line in enumerate(lines) if line.strip()]
-    return set(non_empty[-_TAIL_LINES:]) if non_empty else set()
+    """文末窗口（0 起行号集合）：从末行往回收，累计可见字达到 600 为止，
+    边界行整行计入。"""
+    tail: set[int] = set()
+    accumulated = 0
+    for i in range(len(lines) - 1, -1, -1):
+        if not lines[i].strip():
+            continue
+        tail.add(i)
+        accumulated += _visible_len(lines[i])
+        if accumulated >= _TAIL_WINDOW_CHARS:
+            break
+    return tail
 
 
 def _regex_hits(rule: LintRule, lines: list[str], tail: set[int], whitelist: list[str]) -> list[LintHit]:
@@ -215,10 +93,11 @@ def _regex_hits(rule: LintRule, lines: list[str], tail: set[int], whitelist: lis
     for lineno, line in enumerate(lines, 1):
         if rule.scope == "tail" and (lineno - 1) not in tail:
             continue
-        for match in rule.pattern.finditer(line):
-            snippet = match.group(0)[:40]
-            if any(term in snippet or term in line for term in whitelist):
-                continue
+        if any(term in line for term in whitelist):
+            continue
+        target = _mask_quoted(line) if rule.narrative else line
+        for match in rule.pattern.finditer(target):
+            snippet = line[match.start() : match.end()][:40]
             hits.append(LintHit(rule.id, lineno, snippet, rule.direction))
     return hits
 
@@ -237,10 +116,80 @@ def _degeneration_hits(text: str, whitelist: list[str]) -> list[LintHit]:
     ]
 
 
-def _density_grade(total_hits: int) -> str:
-    if total_hits <= _DENSITY_LIGHT:
+def _period_stutter_hits(lines: list[str], whitelist: list[str]) -> list[LintHit]:
+    """碎句号：连续 ≥6 个 ≤5 字的引号外叙述短句；纯对话行重置计数。"""
+    hits: list[LintHit] = []
+    run_len = 0
+    run_line = 0
+    for lineno, line in enumerate(lines, 1):
+        if any(term in line for term in whitelist):
+            continue
+        narrative = _strip_quoted(line)
+        if not narrative.strip():
+            run_len = 0
+            continue
+        for sentence in split_sentences(narrative):
+            if _visible_len(sentence) <= _STUTTER_MAX_SENTENCE:
+                if run_len == 0:
+                    run_line = lineno
+                run_len += 1
+                if run_len == _STUTTER_MIN_RUN:
+                    hits.append(
+                        LintHit(
+                            "period-stutter", run_line,
+                            f"连续 {run_len} 个短句无呼吸",
+                            "按节拍把碎句合并成中长句，补回画面与连接",
+                        )
+                    )
+            else:
+                run_len = 0
+    return hits
+
+
+def _long_paragraph_hits(lines: list[str], whitelist: list[str]) -> list[LintHit]:
+    """单段过长：单行超过 200 字提示按镜头断段（手机阅读保守线）。"""
+    return [
+        LintHit("long-paragraph", lineno, f"段落 {len(line)} 字", "按镜头/新动作/新线索断段，别一段到底")
+        for lineno, line in enumerate(lines, 1)
+        if line.strip() and len(line) > _LONG_PARAGRAPH_CHARS
+        and not any(term in line for term in whitelist)
+    ]
+
+
+def _action_list_hits(lines: list[str], whitelist: list[str]) -> list[LintHit]:
+    """监控摄像头式动作清单：同段 ≥5 个通用动作动词且用 ≥4 个分隔符串成步骤表。"""
+    hits: list[LintHit] = []
+    for lineno, line in enumerate(lines, 1):
+        if not line.strip() or any(term in line for term in whitelist):
+            continue
+        narrative = _strip_quoted(line)
+        verbs = len(ACTION_LIST_VERBS.findall(narrative))
+        if verbs < _ACTION_LIST_MIN_HITS:
+            continue
+        separators = len(_SEPARATOR_RE.findall(narrative))
+        if separators < _ACTION_LIST_MIN_SEPARATORS:
+            continue
+        hits.append(
+            LintHit(
+                "action-list", lineno,
+                f"同段动作动词 {verbs} 个、分隔符 {separators} 个",
+                "合并琐碎步骤，只保留有情绪/情节功能的动作",
+            )
+        )
+    return hits
+
+
+def _density_grade(effective_hits: int, word_count: int) -> str:
+    if word_count >= _DENSITY_MIN_CHARS:
+        per_kilo = effective_hits / word_count * 1000
+        if per_kilo <= _DENSITY_PER_KILO_LIGHT:
+            return "轻"
+        if per_kilo <= _DENSITY_PER_KILO_MID:
+            return "中"
+        return "重"
+    if effective_hits <= _DENSITY_COUNT_LIGHT:
         return "轻"
-    if total_hits <= _DENSITY_MID:
+    if effective_hits <= _DENSITY_COUNT_MID:
         return "中"
     return "重"
 
@@ -253,26 +202,35 @@ def run_lint(text: str, whitelist: list[str] | None = None) -> LintReport:
 
     hits: list[LintHit] = []
     hits.extend(_degeneration_hits(text, whitelist))
-    for rule in _RULE_TABLE:
+    hits.extend(_period_stutter_hits(lines, whitelist))
+    hits.extend(_long_paragraph_hits(lines, whitelist))
+    hits.extend(_action_list_hits(lines, whitelist))
+    for rule in RULE_TABLE:
         hits.extend(_regex_hits(rule, lines, tail, whitelist))
 
     report = LintReport(word_count=cjk_len(text))
     counts_by_rule = Counter(h.rule_id for h in hits)
+    effective_advisory_hits = 0
     for rule in ALL_RULES:
         count = counts_by_rule.get(rule.id, 0)
         if count == 0:
             continue
-        if rule.severity == "blocking" and count > rule.limit:
-            report.blocking.append(
-                LintViolation(rule.id, rule.severity, count, rule.limit, rule.description, rule.direction)
-            )
-        elif rule.severity == "advisory":
+        if rule.severity == "blocking":
+            if count > rule.limit:
+                report.blocking.append(
+                    LintViolation(rule.id, rule.severity, count, rule.limit, rule.description, rule.direction)
+                )
+            continue
+        # advisory：密度型规则须「次数 + 每千字」双达标才列出（防短文本误报）
+        listed = True
+        if rule.per_kilo is not None:
+            per_kilo = count / max(report.word_count, 1) * 1000
+            listed = count > rule.limit and per_kilo > rule.per_kilo
+        if listed:
             report.advisory.append(
                 LintViolation(rule.id, rule.severity, count, rule.limit, rule.description, rule.direction)
             )
-    advisory_hit_total = sum(
-        counts_by_rule.get(rule.id, 0) for rule in ALL_RULES if rule.severity == "advisory"
-    )
-    report.density_grade = _density_grade(advisory_hit_total)
+            effective_advisory_hits += count
+    report.density_grade = _density_grade(effective_advisory_hits, report.word_count)
     report.hits = hits
     return report

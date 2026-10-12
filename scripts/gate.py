@@ -15,9 +15,12 @@ from scripts.lint.rules import run_lint
 from scripts.metrics.bands import classify
 from scripts.metrics.indicators import (
     burst_cv,
+    connective_density,
     dialogue_ratio,
+    equal_runs,
     lexical_density,
     paragraph_cv,
+    particle_density,
     sentence_length_std,
     trigram_stats,
     ttr,
@@ -40,11 +43,14 @@ def run_layer1(text: str, previous_text: str | None = None) -> dict:
         "sigma2": sentence_length_std(sentences),
         "burst_cv": burst_cv(sentences),
         "para_cv": paragraph_cv(paragraphs),
+        "equal_run": round(equal_runs(sentences) / max(len(sentences), 1) * 100, 2),
         "trigram_rep": rep,
         "trigram_uniq": uniq,
         "ttr": ttr_value,
         "dialogue_ratio": dial,
         "lexical_density": density,
+        "particle_density": particle_density(prose),
+        "connective_density": connective_density(prose),
     }
     degraded = {"ttr": ttr_degraded, "lexical_density": density_degraded}
     verdicts = [
